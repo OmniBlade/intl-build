@@ -1,0 +1,99 @@
+name: libintl-build
+
+on:
+  pull_request:
+  push:
+    paths-ignore:
+    - README.md'
+  
+jobs:   
+  build_libintl_msvc:
+    runs-on: windows-2019
+    strategy:
+      matrix:
+        platform: [x86, amd64]
+          
+    steps:
+    - uses: actions/checkout@v2
+      with:
+        submodules: 'recursive'   
+        fetch-depth: 0
+        ref: ${{ github.event.pull_request.head.sha }}
+        
+    - uses: ilammy/msvc-dev-cmd@v1.4.1
+      with:
+        arch: ${{ matrix.platform }}
+        
+    - name: Set variables
+      id: vars
+      run: |
+        If ("${{ matrix.platform }}" -eq "x86") {
+          echo "::set-output name=msys::MINGW32"
+          echo "::set-output name=mgwarch::i686"
+        } else {
+          echo "::set-output name=msys::MINGW64"
+          echo "::set-output name=mgwarch::x86_64"
+        }
+        
+    - uses: msys2/setup-msys2@v2
+      with:
+        path-type: inherit
+        msystem: ${{ steps.vars.outputs.msys }}
+      
+    - name: Install dependencies
+      run: |
+        set MSYSTEM=MSYS
+        msys2 -c 'pacman --noconfirm -S make gcc diffutils wget mingw-w64-${{ steps.vars.outputs.mgwarch }}-toolchain mingw-w64-${{ steps.vars.outputs.mgwarch }}-pkg-config'
+        
+    - name: Build static iconv
+      shell: msys2 {0}
+      run: |
+        export cwd=`pwd`
+        wget https://ftp.gnu.org/pub/gnu/libiconv/libiconv-1.16.tar.gz
+        tar -xvf libiconv-1.16.tar.gz
+        patch -p0 < 0001-iconv-export.patch
+        mkdir libiconv-1.16/build
+        cd libiconv-1.16/build
+        ../configure --host=${{ steps.vars.outputs.mgwarch }}-w64-mingw32 --enable-static --disable-dependency-tracking --disable-rpath --disable-nls --prefix=$cwd/iconv_inst CC="$cwd/libiconv-1.16/build-aux/compile cl -nologo" CFLAGS="-MD" CXX="$cwd/libiconv-1.16/build-aux/compile cl -nologo" CXXFLAGS="-MD" CPPFLAGS="-D_WIN32_WINNT=_WIN32_WINNT_WIN7 -I$cwd/iconv_inst/include" LDFLAGS="-L$cwd/iconv_inst/lib" LD="link" NM="dumpbin -symbols" STRIP=":" AR="$cwd/libiconv-1.16/build-aux/ar-lib lib" RANLIB=":"
+        make
+        make install
+        mv $cwd/iconv_inst/lib/iconv.dll.lib $cwd/iconv_inst/lib/iconv.dll.old
+        mv $cwd/iconv_inst/lib/iconv.lib $cwd/iconv_inst/lib/iconv.dll.lib
+        
+    - name: Build libintl
+      shell: msys2 {0}
+      run: |
+        export cwd=`pwd`
+        wget https://ftp.gnu.org/gnu/gettext/gettext-0.21.tar.gz
+        tar -xvf gettext-0.21.tar.gz
+        cd gettext-0.21
+        patch -p1 < $cwd/0001-libintl-win-unicode-paths.patch
+        mkdir $cwd/gettext-0.21/gettext-runtime/build
+        cd $cwd/gettext-0.21/gettext-runtime/build
+        ../configure --host=${{ steps.vars.outputs.mgwarch }}-w64-mingw32 --disable-dependency-tracking --disable-static --enable-silent-rules --disable-rpath --enable-nls --disable-csharp --disable-java --enable-threads=windows --enable-relocatable --disable-libasprintf --prefix=$cwd/libintl CC="$cwd/libiconv-1.16/build-aux/compile cl -nologo" CFLAGS="-MD" CXX="$cwd/libiconv-1.16/build-aux/compile cl -nologo" CXXFLAGS="-MD" CPPFLAGS="-D_WIN32_WINNT=_WIN32_WINNT_WIN7 -I$cwd/iconv_inst/include" LDFLAGS="-L$cwd/iconv_inst/lib" LD="link" NM="dumpbin -symbols" STRIP=":" AR="$cwd/libiconv-1.16/build-aux/ar-lib lib" RANLIB=":"
+        make
+        make install
+        cd $cwd/libintl
+
+    - name: Create archives
+      shell: bash
+      run: |
+        mkdir artifact
+        7z a artifact/libintl-0.21-win-msvc-${{ steps.vars.outputs.mgwarch }}.zip libintl/*
+        
+    - name: Upload artifact
+      uses: actions/upload-artifact@v1
+      with:
+        name: libintl-msvc
+        path: artifact
+        
+    - name: Upload release
+      if: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/master' }}
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: "v0.21"
+        files: |
+          artifact\*
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        
